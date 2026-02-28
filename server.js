@@ -64,7 +64,7 @@ const server = http.createServer(async (req, res) => {
       writeFileSync(inputPath, body.text);
 
       writeFileSync(scriptPath, `
-        const { chromium } = require('playwright-core');
+        const { chromium } = require('/app/node_modules/playwright-core');
         const fs = require('fs');
         (async () => {
           const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
@@ -122,7 +122,7 @@ const server = http.createServer(async (req, res) => {
       if (!body.commands) return jsonRes(res, { error: 'commands required' }, 400);
       const scriptPath = join(WORK_DIR, 'task.js');
       writeFileSync(scriptPath, `
-        const { chromium } = require('playwright-core');
+        const { chromium } = require('/app/node_modules/playwright-core');
         (async () => {
           const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
           const page = await browser.newPage();
