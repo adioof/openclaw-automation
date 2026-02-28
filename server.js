@@ -5,7 +5,18 @@ const { join } = require('path');
 
 const PORT = process.env.PORT || 3000;
 const WORK_DIR = '/tmp/pipeline';
+const AUTH_DIR = '/tmp/auth';
 if (!existsSync(WORK_DIR)) mkdirSync(WORK_DIR, { recursive: true });
+if (!existsSync(AUTH_DIR)) mkdirSync(AUTH_DIR, { recursive: true });
+
+// Start Xvfb for non-headless browser
+try {
+  execSync('Xvfb :99 -screen 0 1920x1080x24 &', { stdio: 'pipe' });
+  process.env.DISPLAY = ':99';
+  console.log('Xvfb started on :99');
+} catch (e) {
+  console.log('Xvfb setup:', e.message);
+}
 
 function parseBody(req) {
   return new Promise((resolve, reject) => {
@@ -67,7 +78,7 @@ const server = http.createServer(async (req, res) => {
         const { chromium } = require('/app/node_modules/playwright-core');
         const fs = require('fs');
         (async () => {
-          const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+          const browser = await chromium.launch({ headless: false, args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'] });
           const page = await browser.newPage();
           await page.goto('https://www.humanizeai.io/', { waitUntil: 'networkidle', timeout: 30000 });
           const input = fs.readFileSync('${inputPath}', 'utf8');
@@ -122,7 +133,7 @@ const server = http.createServer(async (req, res) => {
       writeFileSync(scriptPath, `
         const { chromium } = require('/app/node_modules/playwright-core');
         (async () => {
-          const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+          const browser = await chromium.launch({ headless: false, args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'] });
           const page = await browser.newPage();
           const results = [];
           const commands = ${JSON.stringify(body.commands)};
@@ -145,6 +156,132 @@ const server = http.createServer(async (req, res) => {
       `);
       const result = await run('node ' + scriptPath, 120000);
       return jsonRes(res, JSON.parse(result.trim()));
+    }
+
+    // Auth flow — sign into a service and save session
+    if (url.pathname === '/auth/save') {
+      if (!body.url || !body.name) return jsonRes(res, { error: 'url and name required' }, 400);
+      const statePath = join(AUTH_DIR, body.name + '.json');
+      const scriptPath = join(WORK_DIR, 'auth.js');
+      writeFileSync(scriptPath, `
+        const { chromium } = require('/app/node_modules/playwright-core');
+        (async () => {
+          const browser = await chromium.launch({
+            headless: false,
+            args: ['--no-sandbox', '--disable-blink-features=AutomationControlled']
+          });
+          const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            viewport: { width: 1920, height: 1080 }
+          });
+          const page = await context.newPage();
+          await page.goto('${body.url}', { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+          // Run provided steps
+          const steps = ${JSON.stringify(body.steps || [])};
+          for (const step of steps) {
+            try {
+              if (step.action === 'fill') await page.fill(step.selector, step.value);
+              else if (step.action === 'click') await page.click(step.selector);
+              else if (step.action === 'wait') await page.waitForTimeout(step.ms || 2000);
+              else if (step.action === 'type') await page.type(step.selector, step.value, { delay: 50 });
+            } catch (e) {
+              console.error('Step error:', e.message);
+            }
+          }
+
+          // Wait for user-specified delay to complete auth
+          await page.waitForTimeout(${body.waitMs || 5000});
+
+          // Save storage state
+          await context.storageState({ path: '${statePath}' });
+          console.log(JSON.stringify({ status: 'ok', saved: '${statePath}' }));
+          await browser.close();
+        })();
+      `);
+      const result = await run('node ' + scriptPath, body.timeout || 120000);
+      try {
+        return jsonRes(res, JSON.parse(result.trim()));
+      } catch {
+        return jsonRes(res, { output: result.trim() });
+      }
+    }
+
+    // Check saved auth sessions
+    if (url.pathname === '/auth/list') {
+      const files = require('fs').readdirSync(AUTH_DIR).filter(f => f.endsWith('.json'));
+      return jsonRes(res, { sessions: files.map(f => f.replace('.json', '')) });
+    }
+
+    // Publish to Medium using saved auth
+    if (url.pathname === '/publish/medium') {
+      if (!body.title || !body.content) return jsonRes(res, { error: 'title and content required' }, 400);
+      const statePath = join(AUTH_DIR, 'medium.json');
+      if (!existsSync(statePath)) return jsonRes(res, { error: 'No Medium auth session. POST /auth/save first with name=medium' }, 400);
+
+      const contentPath = join(WORK_DIR, 'article.txt');
+      writeFileSync(contentPath, body.content);
+      const scriptPath = join(WORK_DIR, 'publish_medium.js');
+      writeFileSync(scriptPath, `
+        const { chromium } = require('/app/node_modules/playwright-core');
+        const fs = require('fs');
+        (async () => {
+          const browser = await chromium.launch({
+            headless: false,
+            args: ['--no-sandbox', '--disable-blink-features=AutomationControlled']
+          });
+          const context = await browser.newContext({
+            storageState: '${statePath}',
+            userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            viewport: { width: 1920, height: 1080 }
+          });
+          const page = await context.newPage();
+          
+          // Go to new story
+          await page.goto('https://medium.com/new-story', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.waitForTimeout(5000);
+          
+          // Check if we're logged in
+          const url = page.url();
+          if (url.includes('signin') || url.includes('login')) {
+            console.log(JSON.stringify({ error: 'Not logged in. Re-auth needed.' }));
+            await browser.close();
+            return;
+          }
+          
+          const content = fs.readFileSync('${contentPath}', 'utf8');
+          const title = ${JSON.stringify(body.title)};
+          const tags = ${JSON.stringify(body.tags || [])};
+          
+          // Type title
+          await page.locator('[data-testid="title"], h3[contenteditable], .graf--title, [role="textbox"]').first().click();
+          await page.keyboard.type(title, { delay: 20 });
+          await page.keyboard.press('Enter');
+          await page.keyboard.press('Enter');
+          
+          // Paste content (Medium supports markdown paste)
+          await page.evaluate((text) => {
+            const clipboardData = new DataTransfer();
+            clipboardData.setData('text/plain', text);
+            const event = new ClipboardEvent('paste', { clipboardData, bubbles: true });
+            document.activeElement.dispatchEvent(event);
+          }, content);
+          
+          await page.waitForTimeout(3000);
+          
+          // Save as draft first
+          await context.storageState({ path: '${statePath}' });
+          
+          console.log(JSON.stringify({ status: 'draft_created', url: page.url() }));
+          await browser.close();
+        })();
+      `);
+      const result = await run('node ' + scriptPath, 120000);
+      try {
+        return jsonRes(res, JSON.parse(result.trim()));
+      } catch {
+        return jsonRes(res, { output: result.trim() });
+      }
     }
 
     return jsonRes(res, { error: 'not found' }, 404);
