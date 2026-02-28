@@ -73,10 +73,8 @@ const server = http.createServer(async (req, res) => {
           const input = fs.readFileSync('${inputPath}', 'utf8');
           await page.locator('textarea').first().fill(input);
           await page.locator('button', { hasText: /humanize/i }).first().click();
-          await page.waitForTimeout(15000);
-          const textareas = await page.locator('textarea').all();
-          let output = '';
-          if (textareas.length > 1) output = await textareas[1].inputValue();
+          await page.waitForTimeout(20000);
+          const output = await page.locator('#outputText').innerText().catch(() => '') || await page.locator('#result').innerText().catch(() => '');
           console.log(JSON.stringify({ humanized: output || 'NO_OUTPUT' }));
           await browser.close();
         })();
