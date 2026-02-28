@@ -11,7 +11,7 @@ if (!existsSync(AUTH_DIR)) mkdirSync(AUTH_DIR, { recursive: true });
 
 // Start Xvfb for non-headless browser
 try {
-  execSync('Xvfb :99 -screen 0 1920x1080x24 &', { stdio: 'pipe' });
+  exec('Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp');
   process.env.DISPLAY = ':99';
   console.log('Xvfb started on :99');
 } catch (e) {
@@ -277,6 +277,83 @@ const server = http.createServer(async (req, res) => {
         })();
       `);
       const result = await run('node ' + scriptPath, 120000);
+      try {
+        return jsonRes(res, JSON.parse(result.trim()));
+      } catch {
+        return jsonRes(res, { output: result.trim() });
+      }
+    }
+
+    // Browserbase-powered browser task (stealth, bypasses Cloudflare/bot detection)
+    if (url.pathname === '/bb/run') {
+      if (!body.commands) return jsonRes(res, { error: 'commands required' }, 400);
+      const bbKey = body.apiKey || process.env.BROWSERBASE_API_KEY;
+      const bbProject = body.projectId || process.env.BROWSERBASE_PROJECT_ID;
+      if (!bbKey || !bbProject) return jsonRes(res, { error: 'Browserbase API key and project ID required' }, 400);
+
+      const scriptPath = join(WORK_DIR, 'bb_task.js');
+      writeFileSync(scriptPath, `
+        const { chromium } = require('/app/node_modules/playwright-core');
+        (async () => {
+          // Create Browserbase session
+          const resp = await fetch('https://www.browserbase.com/v1/sessions', {
+            method: 'POST',
+            headers: { 'x-bb-api-key': '${bbKey}', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectId: '${bbProject}' })
+          });
+          const session = await resp.json();
+          
+          // Connect via CDP
+          const browser = await chromium.connectOverCDP(
+            'wss://connect.browserbase.com?apiKey=${bbKey}&sessionId=' + session.id
+          );
+          const context = browser.contexts()[0];
+          const page = context.pages()[0];
+          
+          const results = [];
+          const commands = ${JSON.stringify(body.commands)};
+          for (const cmd of commands) {
+            try {
+              if (cmd.action === 'goto') {
+                await page.goto(cmd.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              } else if (cmd.action === 'fill') {
+                await page.fill(cmd.selector, cmd.value);
+              } else if (cmd.action === 'click') {
+                await page.click(cmd.selector, { timeout: 10000 });
+              } else if (cmd.action === 'wait') {
+                await page.waitForTimeout(cmd.ms || 2000);
+              } else if (cmd.action === 'type') {
+                await page.type(cmd.selector, cmd.value, { delay: cmd.delay || 50 });
+              } else if (cmd.action === 'text') {
+                results.push(await page.locator(cmd.selector).innerText());
+              } else if (cmd.action === 'eval') {
+                results.push(await page.evaluate(cmd.code));
+              } else if (cmd.action === 'screenshot') {
+                const buf = await page.screenshot();
+                results.push('screenshot:' + buf.toString('base64').substring(0, 100) + '...');
+              } else if (cmd.action === 'url') {
+                results.push(page.url());
+              } else if (cmd.action === 'keyboard') {
+                if (cmd.text) await page.keyboard.type(cmd.text, { delay: cmd.delay || 20 });
+                if (cmd.key) await page.keyboard.press(cmd.key);
+              } else if (cmd.action === 'paste') {
+                await page.evaluate((text) => {
+                  const dt = new DataTransfer();
+                  dt.setData('text/plain', text);
+                  document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true }));
+                }, cmd.text);
+              }
+              results.push({ action: cmd.action, status: 'ok' });
+            } catch (e) {
+              results.push({ action: cmd.action, error: e.message });
+            }
+          }
+          
+          console.log(JSON.stringify({ results, sessionId: session.id }));
+          await browser.close();
+        })();
+      `);
+      const result = await run('node ' + scriptPath, body.timeout || 180000);
       try {
         return jsonRes(res, JSON.parse(result.trim()));
       } catch {
