@@ -7,9 +7,9 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install
 
-COPY server.js ./
+COPY server.js humanize-script.js medium-publish.js medium-auth.js ./
 
 ENV PORT=3000
 EXPOSE 3000
 
-CMD ["node", "server.js"]
+CMD ["bash", "-c", "Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp & export DISPLAY=:99 && node server.js"]
