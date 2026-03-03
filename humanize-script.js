@@ -1,7 +1,7 @@
 const { chromium } = require('playwright-core');
 const fs = require('fs');
 
-const MAX_CHUNK = 2000;
+const MAX_CHUNK = 3000; // Larger chunks = fewer requests = less rate limiting
 const INPUT_PATH = process.argv[2] || '/tmp/pipeline/input.txt';
 
 function chunkText(text) {
@@ -94,10 +94,15 @@ async function humanizeChunk(page, text, retries = 2) {
       console.error(`Chunk ${i + 1}/${chunks.length}: code block (passthrough, ${chunk.text.length} chars)`);
     } else {
       console.error(`Chunk ${i + 1}/${chunks.length}: humanizing ${chunk.text.length} chars...`);
-      const humanized = await humanizeChunk(page, chunk.text);
-      results.push(humanized);
-      console.error(`Chunk ${i + 1} done: ${humanized.length} chars`);
-      if (i < chunks.length - 1) await page.waitForTimeout(2000);
+      try {
+        const humanized = await humanizeChunk(page, chunk.text);
+        results.push(humanized);
+        console.error(`Chunk ${i + 1} done: ${humanized.length} chars`);
+      } catch (e) {
+        console.error(`Chunk ${i + 1} FAILED (${e.message}), using original`);
+        results.push(chunk.text); // fallback to original text
+      }
+      if (i < chunks.length - 1) await page.waitForTimeout(3000);
     }
   }
 
