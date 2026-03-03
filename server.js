@@ -2,6 +2,7 @@ const http = require('http');
 const { exec, execSync } = require('child_process');
 const { writeFileSync, mkdirSync, existsSync } = require('fs');
 const { join } = require('path');
+const { humanize: humanizeText, detectOnly } = require('./humanizer');
 
 const PORT = process.env.PORT || 3000;
 const WORK_DIR = '/tmp/pipeline';
@@ -39,7 +40,7 @@ const server = http.createServer(async (req, res) => {
     return jsonRes(res, {
       status: 'ok',
       service: 'tripsy-pipeline',
-      endpoints: ['/humanize', '/medium/auth', '/medium/auth/complete', '/medium/publish', '/video/assemble', '/browser/run', '/exec'],
+      endpoints: ['/api/v1/humanize', '/api/v1/detect', '/humanize', '/medium/auth', '/medium/auth/complete', '/medium/publish', '/video/assemble', '/browser/run', '/exec'],
     });
   }
 
@@ -55,13 +56,52 @@ const server = http.createServer(async (req, res) => {
       return jsonRes(res, { output: result.trim() });
     }
 
-    // Humanize text via ai-text-humanizer.com with chunking support
-    if (url.pathname === '/humanize') {
-      if (!body.text) return jsonRes(res, { error: 'text required' }, 400);
+    // ============================================================
+    // HUMANIZER API v2 — LLM-based with detection verification
+    // ============================================================
 
+    // POST /api/v1/humanize — Full humanize pipeline
+    if (url.pathname === '/api/v1/humanize' || url.pathname === '/humanize') {
+      if (!body.text) return jsonRes(res, { error: 'text required' }, 400);
+      if (!body.llm_api_key && !body.llm) return jsonRes(res, { error: 'llm_api_key required (or llm object with provider, apiKey, model)' }, 400);
+
+      try {
+        const llmConfig = body.llm || {};
+        const result = await humanizeText(body.text, {
+          llm_provider: llmConfig.provider || body.llm_provider || 'openai',
+          llm_api_key: llmConfig.apiKey || body.llm_api_key,
+          llm_model: llmConfig.model || body.llm_model,
+          llm_base_url: llmConfig.baseUrl || body.llm_base_url,
+          detector_api_key: body.detector_api_key || process.env.GPTZERO_API_KEY,
+          max_retries: body.max_retries,
+          target_score: body.target_score,
+          max_chunk_size: body.max_chunk_size,
+        });
+        return jsonRes(res, result);
+      } catch (err) {
+        return jsonRes(res, { error: err.message }, 500);
+      }
+    }
+
+    // POST /api/v1/detect — AI detection only
+    if (url.pathname === '/api/v1/detect') {
+      if (!body.text) return jsonRes(res, { error: 'text required' }, 400);
+      const apiKey = body.detector_api_key || process.env.GPTZERO_API_KEY;
+      if (!apiKey) return jsonRes(res, { error: 'detector_api_key required (or set GPTZERO_API_KEY env)' }, 400);
+
+      try {
+        const result = await detectOnly(body.text, apiKey);
+        return jsonRes(res, result);
+      } catch (err) {
+        return jsonRes(res, { error: err.message }, 500);
+      }
+    }
+
+    // Legacy browser-based humanize (kept for backwards compat)
+    if (url.pathname === '/humanize/legacy') {
+      if (!body.text) return jsonRes(res, { error: 'text required' }, 400);
       const inputPath = join(WORK_DIR, 'input.txt');
       writeFileSync(inputPath, body.text);
-
       const result = await run('node /app/humanize-script.js ' + inputPath, 600000);
       try {
         return jsonRes(res, JSON.parse(result.trim()));

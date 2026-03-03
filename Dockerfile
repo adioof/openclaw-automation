@@ -8,6 +8,7 @@ COPY package.json ./
 RUN npm install
 
 COPY server.js humanize-script.js medium-publish.js medium-auth.js ./
+COPY humanizer/ ./humanizer/
 
 ENV PORT=3000
 EXPOSE 3000
