@@ -40,7 +40,7 @@ const server = http.createServer(async (req, res) => {
     return jsonRes(res, {
       status: 'ok',
       service: 'tripsy-pipeline',
-      endpoints: ['/api/v1/humanize', '/api/v1/detect', '/humanize', '/medium/auth', '/medium/auth/complete', '/medium/publish', '/video/assemble', '/browser/run', '/exec'],
+      endpoints: ['/api/v1/humanize', '/api/v1/detect', '/humanize', '/medium/auth', '/medium/auth/complete', '/medium/import', '/medium/publish', '/video/assemble', '/browser/run', '/exec'],
     });
   }
 
@@ -156,7 +156,20 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // Medium publish - post an article
+    // Medium import - import a Dev.to article via Medium's "Import a story" feature
+    if (url.pathname === '/medium/import') {
+      if (!body.url) return jsonRes(res, { error: 'url required (Dev.to article URL)' }, 400);
+      const optionsPath = join(WORK_DIR, 'import-options.json');
+      writeFileSync(optionsPath, JSON.stringify({ draft: body.draft !== false }));
+      const result = await run('node /app/medium-import.js ' + JSON.stringify(body.url) + ' ' + optionsPath, 120000);
+      try {
+        return jsonRes(res, JSON.parse(result.trim()));
+      } catch {
+        return jsonRes(res, { output: result.trim() });
+      }
+    }
+
+    // Medium publish - post an article (legacy clipboard paste)
     if (url.pathname === '/medium/publish') {
       if (!body.article) return jsonRes(res, { error: 'article (markdown string) required' }, 400);
       const articlePath = join(WORK_DIR, 'article.md');
