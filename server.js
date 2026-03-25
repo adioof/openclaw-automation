@@ -126,7 +126,7 @@ const server = http.createServer(async (req, res) => {
       if (!body.url) return jsonRes(res, { error: 'magic link url required' }, 400);
       const scriptPath = join(WORK_DIR, 'medium-auth-complete.js');
       writeFileSync(scriptPath, `
-        const { chromium } = require('playwright-core');
+        const { chromium } = require('/app/node_modules/playwright-core');
         const fs = require('fs');
         const COOKIES_PATH = '/tmp/pipeline/medium-cookies.json';
         (async () => {
@@ -220,7 +220,7 @@ const server = http.createServer(async (req, res) => {
       if (!body.commands) return jsonRes(res, { error: 'commands required' }, 400);
       const scriptPath = join(WORK_DIR, 'task.js');
       writeFileSync(scriptPath, `
-        const { chromium } = require('playwright-core');
+        const { chromium } = require('/app/node_modules/playwright-core');
         (async () => {
           const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
           const page = await browser.newPage();
