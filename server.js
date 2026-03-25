@@ -126,7 +126,9 @@ const server = http.createServer(async (req, res) => {
       if (!body.url) return jsonRes(res, { error: 'magic link url required' }, 400);
       const scriptPath = join(WORK_DIR, 'medium-auth-complete.js');
       writeFileSync(scriptPath, `
-        const { chromium } = require('/app/node_modules/playwright-core');
+        const { chromium } = require('/app/node_modules/playwright-extra');
+        const StealthPlugin = require('/app/node_modules/puppeteer-extra-plugin-stealth');
+        chromium.use(StealthPlugin());
         const fs = require('fs');
         const COOKIES_PATH = '/tmp/pipeline/medium-cookies.json';
         (async () => {

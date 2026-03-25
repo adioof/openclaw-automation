@@ -1,9 +1,8 @@
-const { chromium } = require('playwright-core');
+const { chromium } = require('playwright-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs');
 
-// Usage: node medium-import.js <devto-url> [options.json]
-// options.json: { "draft": true }
-// Uses Medium's "Import a story" feature to pull content from a Dev.to URL
+chromium.use(StealthPlugin());
 
 const DEVTO_URL = process.argv[2];
 const OPTIONS_PATH = process.argv[3];
@@ -22,8 +21,15 @@ if (OPTIONS_PATH && fs.existsSync(OPTIONS_PATH)) {
 }
 
 (async () => {
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-  const context = await browser.newContext();
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-blink-features=AutomationControlled']
+  });
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    viewport: { width: 1920, height: 1080 },
+    locale: 'en-US',
+  });
 
   // Load saved cookies
   if (fs.existsSync(COOKIES_PATH)) {
@@ -33,7 +39,7 @@ if (OPTIONS_PATH && fs.existsSync(OPTIONS_PATH)) {
   } else {
     console.log(JSON.stringify({
       error: 'not_authenticated',
-      message: 'No saved cookies. Run /medium/auth first to authenticate.'
+      message: 'No saved cookies. Run /medium/auth first.'
     }));
     await browser.close();
     return;
@@ -43,17 +49,24 @@ if (OPTIONS_PATH && fs.existsSync(OPTIONS_PATH)) {
 
   // Go to Medium import page
   await page.goto('https://medium.com/p/import', {
-    waitUntil: 'domcontentloaded',
-    timeout: 30000
+    waitUntil: 'networkidle',
+    timeout: 60000
   });
-  await page.waitForTimeout(3000);
+  await page.waitForTimeout(5000);
+
+  // Check for Cloudflare
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  if (bodyText.includes('security verification') || bodyText.includes('Cloudflare')) {
+    console.error('Cloudflare challenge, waiting...');
+    await page.waitForTimeout(15000);
+  }
 
   // Check if we're logged in
   const url = page.url();
   if (url.includes('/m/signin') || url.includes('/login')) {
     console.log(JSON.stringify({
       error: 'not_authenticated',
-      message: 'Not logged in to Medium. Run /medium/auth first.',
+      message: 'Not logged in. Run /medium/auth first.',
       currentUrl: url
     }));
     await browser.close();
@@ -62,16 +75,15 @@ if (OPTIONS_PATH && fs.existsSync(OPTIONS_PATH)) {
 
   console.error('On import page:', url);
 
-  // Find the URL input field and paste the Dev.to URL
+  // Find the URL input field
   const urlInput = page.locator('input[type="text"], input[type="url"], input[placeholder*="URL"], input[placeholder*="url"], input[placeholder*="link"], input[placeholder*="paste"]').first();
 
   try {
-    await urlInput.waitFor({ state: 'visible', timeout: 10000 });
+    await urlInput.waitFor({ state: 'visible', timeout: 15000 });
     await urlInput.click();
     await urlInput.fill(DEVTO_URL);
     console.error('Filled URL:', DEVTO_URL);
   } catch (e) {
-    // Try alternative: look for any visible input
     const inputs = await page.locator('input').all();
     let found = false;
     for (const input of inputs) {
@@ -79,58 +91,54 @@ if (OPTIONS_PATH && fs.existsSync(OPTIONS_PATH)) {
         await input.click();
         await input.fill(DEVTO_URL);
         found = true;
-        console.error('Filled URL via fallback input');
+        console.error('Filled via fallback');
         break;
       }
     }
     if (!found) {
-      // Take screenshot for debugging
       await page.screenshot({ path: '/tmp/pipeline/medium-import-debug.png' });
       console.log(JSON.stringify({
         error: 'input_not_found',
-        message: 'Could not find URL input field on import page',
+        message: 'Could not find URL input',
         screenshot: '/tmp/pipeline/medium-import-debug.png',
-        pageUrl: page.url()
+        pageUrl: page.url(),
+        pageText: (await page.locator('body').innerText().catch(() => '')).substring(0, 500)
       }));
       await browser.close();
       return;
     }
   }
 
-  // Click the import button
+  // Click import button
   const importBtn = page.locator('button:has-text("Import"), button:has-text("import"), input[type="submit"]').first();
   try {
     await importBtn.waitFor({ state: 'visible', timeout: 5000 });
     await importBtn.click();
-    console.error('Clicked import button');
+    console.error('Clicked import');
   } catch (e) {
-    // Try pressing Enter instead
     await page.keyboard.press('Enter');
-    console.error('Pressed Enter (import button not found)');
+    console.error('Pressed Enter');
   }
 
-  // Wait for import to complete — Medium redirects to the draft editor
-  await page.waitForTimeout(15000);
+  // Wait for import to complete
+  await page.waitForTimeout(20000);
 
   const finalUrl = page.url();
-  console.error('After import, URL:', finalUrl);
+  console.error('After import:', finalUrl);
 
-  // Check if we landed on an editor page (draft created)
-  const isDraft = finalUrl.includes('/p/') || finalUrl.includes('/edit') || finalUrl.includes('/new-story');
   const isImportPage = finalUrl.includes('/p/import');
 
   if (isImportPage) {
-    // Still on import page — check for error messages
-    const errorText = await page.locator('.error, [class*="error"], [class*="Error"]').textContent().catch(() => null);
     await page.screenshot({ path: '/tmp/pipeline/medium-import-result.png' });
+    const errorText = await page.locator('.error, [class*="error"], [class*="Error"]').textContent().catch(() => null);
+    const pageContent = await page.locator('body').innerText().catch(() => '');
     console.log(JSON.stringify({
-      error: 'import_failed',
-      message: errorText || 'Still on import page after 15s — import may have failed',
+      error: 'import_may_have_failed',
+      message: errorText || 'Still on import page after 20s',
       screenshot: '/tmp/pipeline/medium-import-result.png',
-      pageUrl: finalUrl
+      pageText: pageContent.substring(0, 500)
     }));
   } else {
-    // Save cookies
     const cookies = await context.cookies();
     fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies));
 
